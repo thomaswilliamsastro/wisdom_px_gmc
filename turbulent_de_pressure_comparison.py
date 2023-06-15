@@ -4,22 +4,23 @@ Compare internal turbulent to dynamical equilibrium pressure
 
 @author: Tom Williams
 """
+import copy
+import os
+import warnings
 
 import cmocean
-import itertools
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
-import os
-import seaborn as sns
-import warnings
 from astropy.io import fits
+from astropy.nddata import Cutout2D
 from astropy.wcs import WCS
-from astroquery.ned import Ned
+from astroquery.ipac.ned import Ned
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from spectral_cube import SpectralCube
 
 from external.sun_cube_tools import calc_channel_corr
-from vars import wisdom_dir, plot_dir, galaxy_dict, vel_res, mask, co_conv_factors
+from vars import wisdom_dir, plot_dir, galaxy_dict, vel_res, mask, co_conv_factors, zoom
 
 warnings.simplefilter('ignore')
 
@@ -40,24 +41,6 @@ channel_corr_dir = 'channel_corr'
 
 vel_res_int = float(vel_res.strip('kms').replace('p', '.'))
 
-dists = {'frl1146': 134.9,
-         'ic0843': 115.5,
-         'ngc0017': 133.7,
-         'ngc0383': 66.6,
-         'ngc0404': 3.06,
-         'ngc0449': 71.8,
-         'ngc0524': 23.3,
-         'ngc0612': 128.2,
-         'ngc0708': 73.3,
-         'ngc0863': 91.2,
-         'ngc1084': 19.1,
-         'ngc1194': 56.9,
-         'ngc3607': 22.2,
-         'ngc4429': 16.5,
-         'ngc4435': 16.7,
-         'ngc4697': 11.4,
-         'ngc5064': 36.7}
-
 pressure_ratio_radial_bins = {}
 pressure_ratio_radial_values = {}
 
@@ -69,7 +52,7 @@ for galaxy in galaxy_dict.keys():
     co_conv_factor = co_conv_factors[co_line]
     antenna_config = galaxy_dict[galaxy]['antenna_config']
 
-    dist = dists[galaxy]
+    dist = galaxy_dict[galaxy]['info']['dist']
     pc_conversion_fac = 4.84 * dist  # pc/arcsec
 
     try:
@@ -83,7 +66,7 @@ for galaxy in galaxy_dict.keys():
     surf = np.array(galaxy_info['surf'])
     sigma_arcsec = np.array(galaxy_info['sigma_arcsec'])
     qobs = np.array(galaxy_info['qobs'])
-    r25 = galaxy_info['r25'] * pc_conversion_fac
+    r_eff = galaxy_info['reff'] * pc_conversion_fac
 
     # Read in mom0/ew
 
@@ -96,6 +79,8 @@ for galaxy in galaxy_dict.keys():
 
     vel_disp_hdu = fits.open(vel_disp_file_name)[0]
     surf_dens_hdu = fits.open(surf_dens_file_name)[0]
+
+    wcs_orig = WCS(vel_disp_hdu)
 
     vel_disp = vel_disp_hdu.data
     surf_dens = surf_dens_hdu.data * co_conv_factor
@@ -163,7 +148,7 @@ for galaxy in galaxy_dict.keys():
     r = np.sqrt(x_proj ** 2 + y_proj ** 2)
 
     sigma = sigma_arcsec * pc_conversion_fac
-    qintr2 = qobs ** 2 - np.cos(np.radians(inc)) ** 2
+    qintr2 = qobs ** 2  # - np.cos(np.radians(inc)) ** 2
     qintr = np.sqrt(qintr2) / np.sin(np.radians(inc))
     surfcube = (surf * qobs) / (qintr * sigma * np.sqrt(2 * np.pi))
 
@@ -189,12 +174,12 @@ for galaxy in galaxy_dict.keys():
 
     # Create radial profiles of this pressure ratio
 
-    max_dist = 0.4 * r25
+    max_dist = 0.4 * r_eff
 
     radial_bins = np.linspace(0, max_dist, 10)
     bin_width = (radial_bins[1] - radial_bins[0]) / 2
 
-    pressure_ratio_radial_bins[galaxy] = radial_bins / r25
+    pressure_ratio_radial_bins[galaxy] = radial_bins / r_eff
 
     radial_values = np.zeros([len(radial_bins), 3])
 
@@ -208,17 +193,156 @@ for galaxy in galaxy_dict.keys():
 
     # Plot maps for the pressure ratio
 
-    vmin, vmax = -2, 2
+    plot_name = os.path.join(pressure_plot_dir, galaxy + '_pressure_comp_map')
 
-    plot_name = os.path.join(pressure_plot_dir, galaxy + '_map')
+    plt.figure(figsize=(12, 4))
 
-    plt.figure()
-    plt.imshow(pressure_ratio, origin='lower', vmin=vmin, vmax=vmax, cmap=cmocean.cm.balance)
-    plt.colorbar(label=r'$\log10(P_\mathrm{turb}/P_\mathrm{DE})$')
+    # First, turbulent pressure
 
-    plt.axis('off')
+    if galaxy in zoom.keys():
 
-    plt.title(galaxy.upper())
+        position = zoom[galaxy]['centre']
+        if position is None:
+            position = np.asarray(pressure_obs.shape) / 2
+        size = zoom[galaxy]['zoom']
+
+        pressure_obs = Cutout2D(pressure_obs,
+                                wcs=wcs_orig,
+                                position=position,
+                                size=size)
+        wcs = pressure_obs.wcs
+        pressure_obs = pressure_obs.data
+    else:
+        wcs = copy.deepcopy(wcs_orig)
+
+    vmin, vmax = np.nanpercentile(np.log10(pressure_obs), [2.5, 97.5])
+
+    ax = plt.subplot(1, 3, 1, projection=wcs)
+
+    im = plt.imshow(np.log10(pressure_obs),
+                    origin='lower',
+                    interpolation='none',
+                    vmin=vmin, vmax=vmax,
+                    cmap='viridis')
+
+    plt.grid()
+
+    plt.text(0.05, 0.95, galaxy.upper(),
+             ha='left', va='top',
+             bbox=dict(facecolor='white', edgecolor='k'),
+             transform=ax.transAxes)
+
+    ax.coords[0].set_axislabel('RA (J2000)')
+    ax.coords[1].set_axislabel('Dec (J2000)')
+
+    # ax.coords[0].set_ticklabel(rotation=45, pad=40)
+    ax.coords[0].set_major_formatter('hh:mm:ss')
+
+    ax.coords[0].display_minor_ticks(True)
+    ax.coords[1].display_minor_ticks(True)
+
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("top", size="5%", pad=0, axes_class=matplotlib.axes.Axes)
+    plt.colorbar(im, cax=cax, label=r'$\log_{10}(P_\mathrm{turb}~[\mathrm{K~cm^{-3}}])$',
+                 orientation='horizontal')
+    cax.xaxis.set_ticks_position('top')
+    cax.xaxis.set_label_position('top')
+
+    # Second, dynamical equilibrium pressure
+
+    if galaxy in zoom.keys():
+
+        position = zoom[galaxy]['centre']
+        if position is None:
+            position = np.asarray(pressure_equilibrium.shape) / 2
+        size = zoom[galaxy]['zoom']
+
+        pressure_equilibrium = Cutout2D(pressure_equilibrium,
+                                        wcs=wcs_orig,
+                                        position=position,
+                                        size=size)
+        wcs = pressure_equilibrium.wcs
+        pressure_equilibrium = pressure_equilibrium.data
+    else:
+        wcs = copy.deepcopy(wcs_orig)
+
+    vmin, vmax = np.nanpercentile(np.log10(pressure_equilibrium), [2.5, 97.5])
+
+    ax = plt.subplot(1, 3, 2, projection=wcs)
+
+    im = plt.imshow(np.log10(pressure_equilibrium),
+                    origin='lower',
+                    interpolation='none',
+                    vmin=vmin, vmax=vmax,
+                    cmap='viridis')
+
+    plt.grid()
+
+    ax.coords[0].set_axislabel('RA (J2000)')
+    ax.coords[0].set_major_formatter('hh:mm:ss')
+
+    ax.coords[0].display_minor_ticks(True)
+    ax.coords[1].display_minor_ticks(True)
+
+    ax.coords[1].set_ticklabel_visible(False)
+
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("top", size="5%", pad=0, axes_class=matplotlib.axes.Axes)
+    plt.colorbar(im, cax=cax, label=r'$\log_{10}(P_\mathrm{DE}~[\mathrm{K~cm^{-3}}])$',
+                 orientation='horizontal')
+    cax.xaxis.set_ticks_position('top')
+    cax.xaxis.set_label_position('top')
+
+    # Finally, ratio of the two
+    vmin, vmax = -1.5, 1.5
+
+    if galaxy in zoom.keys():
+
+        position = zoom[galaxy]['centre']
+        if position is None:
+            position = np.asarray(pressure_ratio.shape) / 2
+        size = zoom[galaxy]['zoom']
+
+        pressure_ratio = Cutout2D(pressure_ratio,
+                                  wcs=wcs_orig,
+                                  position=position,
+                                  size=size)
+        wcs = pressure_ratio.wcs
+        pressure_ratio = pressure_ratio.data
+    else:
+        wcs = copy.deepcopy(wcs_orig)
+
+    ax = plt.subplot(1, 3, 3, projection=wcs)
+
+    im = plt.imshow(pressure_ratio,
+                    origin='lower',
+                    interpolation='none',
+                    vmin=vmin, vmax=vmax,
+                    cmap=cmocean.cm.balance)
+
+    plt.grid()
+
+    ax.coords[0].set_axislabel('RA (J2000)')
+    ax.coords[1].set_axislabel('Dec (J2000)')
+
+    # ax.coords[0].set_ticklabel(rotation=45, pad=40)
+    ax.coords[0].set_major_formatter('hh:mm:ss')
+
+    ax.coords[0].display_minor_ticks(True)
+    ax.coords[1].display_minor_ticks(True)
+
+    ax.coords[1].set_ticks_position('lr')
+    ax.coords[1].set_ticklabel_position('r')
+    ax.coords[1].set_axislabel_position('r')
+
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("top", size="5%", pad=0, axes_class=matplotlib.axes.Axes)
+    plt.colorbar(im, cax=cax, label=r'$\log_{10}(P_\mathrm{turb}/P_\mathrm{DE})$',
+                 orientation='horizontal')
+    cax.xaxis.set_ticks_position('top')
+    cax.xaxis.set_label_position('top')
+
+    # plt.tight_layout()
 
     # plt.show()
 
@@ -233,8 +357,10 @@ n_final_galaxies = len(pressure_ratio_radial_values.keys())
 plot_name = os.path.join(pressure_plot_dir, 'pressure_comparison_radial')
 
 plt.figure(figsize=(8, 4))
+ax = plt.subplot(111)
 
-colours = itertools.cycle(sns.color_palette('deep'))
+# colours = itertools.cycle(sns.color_palette('deep'))
+colours = iter(plt.cm.viridis(np.linspace(0, 1, len(galaxy_dict.keys()))))
 
 for key in pressure_ratio_radial_values.keys():
     c = next(colours)
@@ -246,12 +372,18 @@ for key in pressure_ratio_radial_values.keys():
 
 plt.axhline(0, c='k', ls='--')
 
-plt.legend(loc='upper left', frameon=False, bbox_to_anchor=(1.1, 0.9))
+plt.legend(loc='center left', frameon=True, fancybox=False, edgecolor='k',
+           bbox_to_anchor=(1.0, 0.5))
 
-plt.xlabel(r'$r/r_{25}$')
-plt.ylabel(r'$\log10(P_\mathrm{turb}/P_\mathrm{DE})$')
+plt.xlabel(r'$R/R_e$')
+plt.ylabel(r'$\log_{10}(P_\mathrm{turb}/P_\mathrm{DE})$')
 
 plt.ylim(-2, 2)
+
+ax.xaxis.set_minor_locator(matplotlib.ticker.AutoMinorLocator())
+ax.yaxis.set_minor_locator(matplotlib.ticker.AutoMinorLocator())
+
+plt.grid()
 
 plt.tight_layout()
 

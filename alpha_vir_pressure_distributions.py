@@ -5,18 +5,15 @@ KDE plot for the virial parameter nad pressure
 @author: Tom Williams
 """
 
-import itertools
+import os
 
 import matplotlib
-import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
-import os
-import pickle
 import seaborn as sns
-from scipy.stats import gaussian_kde
 from astropy.io import fits
-from matplotlib.pyplot import cm
+from scipy.stats import gaussian_kde
+from scipy.stats import kendalltau
 
 from vars import wisdom_dir, plot_dir, galaxy_dict, mask, vel_res, co_conv_factors
 
@@ -75,7 +72,10 @@ f = 10 / 9
 
 target_resolutions = ['60pc', '90pc', '120pc']
 
-parameters = ['alpha_vir']
+parameters = [
+    'alpha_vir',
+    'pressure',
+]
 
 for parameter in parameters:
 
@@ -84,20 +84,31 @@ for parameter in parameters:
 
     parameter_dict = {}
 
+    parameter_vals_dict = {}
+    surf_dens_dict = {}
+    gal_name_dict = {}
+    for target_resolution in target_resolutions:
+        parameter_vals_dict[target_resolution] = []
+        surf_dens_dict[target_resolution] = []
+        gal_name_dict[target_resolution] = []
+
     if parameter == 'alpha_vir':
         xlabel = r'$\alpha_\mathrm{vir}$'
-        xlim = [10**-2.1, 10**2.1]
+        xlim = [10 ** -2.1, 10 ** 2.1]
     elif parameter == 'pressure':
         xlabel = r'$P_\mathregular{turb}$ (K cm$^{-3}$)'
-        xlim = [10**2, 10**9]
+        xlim = [10 ** 1.8, 10 ** 9.2]
     else:
         raise Warning('I dunno what a %s is' % parameter)
+
+    colour = iter(plt.cm.viridis(np.linspace(0, 1, len(galaxy_dict.keys()))))
 
     for galaxy in galaxy_dict.keys():
 
         plot_name = os.path.join(plot_dir, parameter, '%s_%s' % (galaxy, parameter))
 
-        colour = itertools.cycle(sns.color_palette('deep'))
+        # colour = itertools.cycle(sns.color_palette('deep'))
+        c = next(colour)
 
         co_line = galaxy_dict[galaxy]['co_line']
         antenna_config = galaxy_dict[galaxy]['antenna_config']
@@ -108,11 +119,18 @@ for parameter in parameters:
         else:
             inc_factor = 1
 
-        plt.figure(figsize=(5, 4))
-
+        galaxy_target_resolutions = []
         for target_resolution in target_resolutions:
 
-            c = next(colour)
+            if target_resolution in galaxy_dict[galaxy]['resolutions']:
+                galaxy_target_resolutions.append(target_resolution)
+
+        fig, axes = plt.subplots(figsize=(8 / 3 * len(galaxy_target_resolutions), 4),
+                                 nrows=1, ncols=len(galaxy_target_resolutions))
+
+        ylim = None
+
+        for i, target_resolution in enumerate(galaxy_target_resolutions):
 
             # Read in mom0/ew
 
@@ -160,6 +178,10 @@ for parameter in parameters:
             param_val = param_val[idx]
             surf_dens = surf_dens[idx]
 
+            parameter_vals_dict[target_resolution].extend(param_val)
+            surf_dens_dict[target_resolution].extend(surf_dens)
+            gal_name_dict[target_resolution].extend([galaxy] * len(surf_dens))
+
             # Calculate KDE distribution
 
             kde_range = np.arange(np.log10(xlim[0]), np.log10(xlim[1]), 0.01)
@@ -170,22 +192,66 @@ for parameter in parameters:
 
             parameter_dict[galaxy + target_resolution] = percentiles
 
-            plt.plot(10 ** kde_range, kde_hist, label=target_resolution, c=c)
-            plt.axvline(percentiles[1], ls='-', c=c)
-            for percentile in [percentiles[0], percentiles[-1]]:
-                plt.axvline(percentile, ls='--', c=c)
-            plt.xscale('log')
+            axes[i].plot(10 ** kde_range,
+                         kde_hist,
+                         # label=target_resolution,
+                         c=c,
+                         )
+            axes[i].axvline(percentiles[1], ls='-', color=c, alpha=0.5)
+            axes[i].axvspan(xmin=percentiles[0], xmax=percentiles[-1], color=c, alpha=0.15)
+            axes[i].set_xscale('log')
 
-        plt.legend(loc='upper left', frameon=False)
+            if parameter == 'alpha_vir':
+                axes[i].axvline(1, c='k', ls='--')
+                axes[i].axvline(2, c='k', ls='-.')
+            elif parameter == 'pressure':
+                axes[i].axvline(1.8e4, c='k', ls='--')
+                axes[i].axvline(5.1e6, c='k', ls='-.')
 
-        plt.xlim(xlim)
-        ylim = plt.ylim()
-        plt.ylim(0, ylim[-1])
+            locmaj = matplotlib.ticker.LogLocator(base=10, numticks=3)
+            axes[i].xaxis.set_major_locator(locmaj)
 
-        plt.xlabel(xlabel)
-        plt.ylabel('Probability Density')
+            locmin = matplotlib.ticker.LogLocator(base=10.0,
+                                                  subs=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
+                                                  numticks=12)
+            axes[i].xaxis.set_minor_locator(locmin)
+            axes[i].xaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
 
-        plt.tight_layout()
+            axes[i].yaxis.set_minor_locator(matplotlib.ticker.AutoMinorLocator())
+
+            if parameter == 'alpha_vir':
+                axes[i].set_xticks(ticks=[1e-1, 1, 10])
+
+            # plt.legend(loc='upper left', frameon=False)
+
+            axes[i].set_xlim(xlim)
+
+            if target_resolution == galaxy_target_resolutions[0]:
+                ylim = axes[i].get_ylim()
+            axes[i].set_ylim(0, ylim[-1])
+
+            axes[i].grid()
+
+            axes[i].set_xlabel(xlabel)
+
+            if target_resolution in [galaxy_target_resolutions[0], galaxy_target_resolutions[-1]]:
+                axes[i].set_ylabel('Probability Density')
+                if target_resolution == galaxy_target_resolutions[-1]:
+                    axes[i].yaxis.set_ticks_position('right')
+                    axes[i].yaxis.set_label_position('right')
+            else:
+                axes[i].yaxis.set_ticklabels([])
+
+            plt.text(0.05, 0.95, target_resolution,
+                     ha='left', va='top',
+                     bbox=dict(facecolor='white', edgecolor='k'),
+                     transform=axes[i].transAxes)
+
+        # plt.suptitle(galaxy.upper())
+
+        # plt.tight_layout()
+        plt.subplots_adjust(hspace=0, wspace=0)
+        # plt.show()
 
         plt.savefig(plot_name + '.png', bbox_inches='tight')
         plt.savefig(plot_name + '.pdf', bbox_inches='tight')
@@ -195,7 +261,7 @@ for parameter in parameters:
 
     plot_name = os.path.join(plot_dir, parameter + '_distribution')
 
-    plt.figure(figsize=(5, 8))
+    plt.figure(figsize=(4, 8))
     ax1 = plt.subplot(1, 1, 1)
 
     frame1 = plt.gca()
@@ -204,12 +270,13 @@ for parameter in parameters:
 
     marker = ['o', 's', '^', 'p']
     # plot_colour = iter(cm.rainbow(np.linspace(0, 1, len(galaxies))))
-    colour = itertools.cycle(sns.color_palette('deep'))
+    # colour = itertools.cycle(sns.color_palette('deep'))
+    colour = iter(plt.cm.viridis(np.linspace(0, 1, len(galaxy_dict.keys()))))
 
     y_position = 1 / (len(target_resolutions) + 1)
-    positions = [y_position * (i+1) for i in range(len(target_resolutions))]
+    positions = [y_position * (i + 1) for i in range(len(target_resolutions))]
 
-    y_tick_positions = [(2 * i + 1)/2 for i in range(len(galaxy_dict.keys()))]
+    y_tick_positions = [(2 * i + 1) / 2 for i in range(len(galaxy_dict.keys()))]
     y_tick_labels = [galaxy.upper() for galaxy in galaxy_dict.keys()]
 
     for i, galaxy in enumerate(galaxy_dict.keys()):
@@ -232,7 +299,7 @@ for parameter in parameters:
                 continue
 
             xerr = np.array([[parameter_dict[galaxy + target_resolution][0],
-                             parameter_dict[galaxy + target_resolution][-1]]]).T
+                              parameter_dict[galaxy + target_resolution][-1]]]).T
 
             plt.errorbar(parameter_dict[galaxy + target_resolution][1], i + positions[-j - 1],
                          xerr=xerr,
@@ -240,24 +307,99 @@ for parameter in parameters:
 
     if parameter == 'alpha_vir':
         plt.axvline(1, c='k', ls='--')
+        plt.axvline(2, c='k', ls='-.')
+    elif parameter == 'pressure':
+        plt.axvline(1.8e4, c='k', ls='--')
+        plt.axvline(5.1e6, c='k', ls='-.')
 
     plt.xscale('log')
 
     plt.xlim(xlim)
     plt.ylim(0, len(y_tick_labels))
 
+    locmaj = matplotlib.ticker.LogLocator(base=10, numticks=5)
+    ax1.xaxis.set_major_locator(locmaj)
+
+    locmin = matplotlib.ticker.LogLocator(base=10.0,
+                                          subs=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
+                                          numticks=12)
+    ax1.xaxis.set_minor_locator(locmin)
+    ax1.xaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+
     plt.yticks(ticks=y_tick_positions, labels=y_tick_labels)
+    if parameter == 'alpha_vir':
+        plt.xticks(ticks=[1e-1, 1, 10])
+
+    plt.grid(axis='x')
 
     plt.xlabel(xlabel)
 
-    plt.legend(loc='upper left', frameon=False)
+    plt.legend(loc='upper left', frameon=True, edgecolor='k', framealpha=1, fancybox=False)
 
     plt.tight_layout()
+
+    # plt.show()
 
     plt.savefig(plot_name + '.png', bbox_inches='tight')
     plt.savefig(plot_name + '.pdf', bbox_inches='tight')
 
     plt.close()
-    # plt.show()
+
+    for target_resolution in target_resolutions:
+        gal_vals = gal_name_dict[target_resolution]
+        par_vals = parameter_vals_dict[target_resolution]
+        surf_vals = surf_dens_dict[target_resolution]
+
+        np.savetxt(
+            '%s_%s.txt' % (parameter, target_resolution),
+            np.c_[gal_vals, par_vals, surf_vals],
+            fmt='%s',
+        )
+
+    # Finally, have a look at the correlations with SFR
+    target_resolution = '60pc'
+    parameter_vals = np.array([parameter_dict[galaxy + target_resolution][1] for galaxy in galaxy_dict.keys()
+                               if galaxy + target_resolution in parameter_dict.keys()])
+    parameter_err_down = np.array(
+        [parameter_dict[galaxy + target_resolution][1] - parameter_dict[galaxy + target_resolution][0]
+         for galaxy in galaxy_dict.keys()
+         if galaxy + target_resolution in parameter_dict.keys()])
+    parameter_err_up = np.array(
+        [parameter_dict[galaxy + target_resolution][-1] - parameter_dict[galaxy + target_resolution][1]
+         for galaxy in galaxy_dict.keys()
+         if galaxy + target_resolution in parameter_dict.keys()])
+    sfr = np.array([galaxy_dict[galaxy]['info']['sfr'] for galaxy in galaxy_dict.keys()
+                    if galaxy + target_resolution in parameter_dict.keys()])
+
+    tau = kendalltau(parameter_vals, 10 ** sfr, nan_policy='omit')[0]
+
+    plot_name = os.path.join(plot_dir, parameter, '%s_sfr' % parameter)
+
+    plt.figure(figsize=(5, 4))
+
+    ax = plt.subplot(111)
+    plt.errorbar(parameter_vals, 10 ** sfr,
+                 xerr=[parameter_err_down, parameter_err_up],
+                 color='k', marker='o', ls='none')
+
+    plt.xscale('log')
+    plt.yscale('log')
+
+    plt.xlabel(xlabel)
+    plt.ylabel(r'SFR ($M_\odot~\mathrm{yr}^{-1}$)')
+
+    plt.text(0.95, 0.95, r'$\tau=%.2f$' % tau,
+             ha='right', va='top',
+             bbox=dict(facecolor='white', edgecolor='k'),
+             transform=ax.transAxes,
+             )
+
+    plt.grid()
+
+    plt.tight_layout()
+
+    plt.savefig(plot_name + '.png', bbox_inches='tight')
+    plt.savefig(plot_name + '.pdf', bbox_inches='tight')
+    plt.close()
 
 print('Complete!')
